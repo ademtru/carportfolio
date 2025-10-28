@@ -1,12 +1,12 @@
-# Documentation for 3D Models Used in the Bouldering Portfolio
+# Documentation for 3D Models Used in the Car Portfolio
 
-This directory contains the 3D models utilized in the bouldering portfolio website. Each model is designed to enhance the interactive bouldering experience and is optimized for performance in a web environment.
+This directory contains the 3D models utilized in the car portfolio website. Each model is designed to enhance the interactive car experience and is optimized for performance in a web environment.
 
 ## Model Files
 
-- **Climbing Wall Model**: A detailed model representing various climbing walls used in the bouldering scene. This model includes different textures and geometries to simulate real-world climbing environments.
+- **Climbing Wall Model**: A detailed model representing various climbing walls used in the car scene. This model includes different textures and geometries to simulate real-world climbing environments.
   
-- **Bouldering Holds**: A collection of 3D models representing various climbing holds. These models are designed to be placed on the climbing walls and come in different shapes and sizes to provide a realistic climbing experience.
+- **Car Holds**: A collection of 3D models representing various climbing holds. These models are designed to be placed on the climbing walls and come in different shapes and sizes to provide a realistic climbing experience.
 
 ## Usage
 

@@ -1,7 +1,7 @@
 {
-  "name": "bouldering-portfolio",
+  "name": "car-portfolio",
   "version": "1.0.0",
-  "description": "A personal portfolio website featuring a 3D interactive bouldering theme.",
+  "description": "A personal portfolio website featuring a 3D interactive car theme.",
   "main": "index.js",
   "scripts": {
     "dev": "next dev",
@@ -26,7 +26,7 @@
   },
   "keywords": [
     "portfolio",
-    "bouldering",
+    "car",
     "3D",
     "interactive",
     "web"

@@ -1,12 +1,12 @@
 import React from 'react';
-import BoulderingScene from '../components/BoulderingScene';
+import CarScene from '../components/CarScene';
 import Hero from '../components/Hero';
 
 const HomePage = () => {
     return (
         <div>
             <Hero />
-            <BoulderingScene />
+            <CarScene />
         </div>
     );
 };
