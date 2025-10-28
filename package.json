@@ -1,0 +1,36 @@
+{
+  "name": "bouldering-portfolio",
+  "version": "1.0.0",
+  "description": "A personal portfolio website featuring a 3D interactive bouldering theme.",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@react-three/drei": "latest",
+    "@react-three/fiber": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "three": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "24.9.1",
+    "eslint": "latest",
+    "eslint-config-next": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest"
+  },
+  "keywords": [
+    "portfolio",
+    "bouldering",
+    "3D",
+    "interactive",
+    "web"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
