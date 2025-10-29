@@ -5,7 +5,7 @@ import Hero from '../components/Hero';
 const HomePage = () => {
     return (
         <div>
-            <Hero />
+            {/* <Hero /> */}
             <CarScene />
         </div>
     );

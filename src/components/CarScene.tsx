@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { PointerLockControls, useGLTF } from "@react-three/drei";
+import { PointerLockControls, useGLTF, Text3D, Center, Sky, Edges } from "@react-three/drei";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { useEffect } from "react";
 import * as THREE from "three";
@@ -71,6 +71,39 @@ function Mat({
       <boxGeometry args={[width, height, depth]} />
       <meshStandardMaterial color={color} roughness={1} />
     </mesh>
+  );
+}
+
+function FloatingText({ position = [0, 2, -6], text = "", color = "#ffffff" }: { position?: [number, number, number]; text?: string; color?: string; }) {
+  // Use the TTF placed in public/fonts as the font for troika-based Text.
+  // Use local typeface.json placed in public/fonts. Use Text3D for real extrusion.
+  const fontUrl = encodeURI("/fonts/Jersey_10/Jersey 10_Regular.json");
+  const size = 1.6;
+  const height = 0.55;
+  const bevelEnabled = true;
+  const bevelThickness = 0.04;
+  const bevelSize = 0.04;
+
+  return (
+    <group position={position as any}>
+      <Center>
+        <Text3D
+          font={fontUrl}
+          size={size}
+          height={height}
+          bevelEnabled={bevelEnabled}
+          bevelThickness={bevelThickness}
+          bevelSize={bevelSize}
+          curveSegments={12}
+        >
+          {text}
+          {/* main white material */}
+          <meshStandardMaterial attach="material" color={0xffffff} roughness={0} metalness={0.0} />
+          {/* thin black outline using Edges for a crisp border */}
+          <Edges threshold={15} color={0x000000} />
+        </Text3D>
+      </Center>
+    </group>
   );
 }
 
@@ -189,6 +222,54 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
   useFrame(() => {
     // optional: subtle animation or update
   });
+
+  function Clouds({ count = 8 }: { count?: number }) {
+    // Load low-poly cloud GLB from public/models and scatter copies
+    const gltf = useGLTF("/models/low_poly_cloud.glb") as any;
+    const cloudScene = gltf?.scene;
+
+    const instances = React.useMemo(() => {
+      return Array.from({ length: count }).map(() => {
+        return {
+          pos: [(Math.random() - 0.5) * 60, 6 + Math.random() * 10, -20 - Math.random() * 160],
+          // smaller scales: range ~0.6 -> 1.5
+          scale: 0.6 + Math.random() * 0.9,
+          rotY: Math.random() * Math.PI * 2,
+          speed: (Math.random() * 0.6 + 0.15) * (Math.random() > 0.5 ? 1 : -1), // units per second
+        };
+      });
+    }, [count]);
+    const cloudRefs = React.useRef<Array<THREE.Group | null>>([]);
+
+    useFrame((_, delta) => {
+      for (let i = 0; i < instances.length; i++) {
+        const g = cloudRefs.current[i];
+        if (!g) continue;
+        // move horizontally (X axis) based on assigned speed
+        g.position.x += (instances[i].speed as number) * delta;
+        // wrap around when off-screen to keep clouds in view
+        const limit = 40;
+        if (g.position.x > limit) g.position.x = -limit;
+        if (g.position.x < -limit) g.position.x = limit;
+      }
+    });
+
+    return (
+      <group>
+        {instances.map((it, i) => (
+          <group
+            key={i}
+            ref={(r) => (cloudRefs.current[i] = r)}
+            position={it.pos as any}
+            rotation={[0, it.rotY, 0]}
+            scale={[it.scale, it.scale, it.scale]}
+          >
+            {cloudScene ? <primitive object={cloudScene.clone(true)} /> : null}
+          </group>
+        ))}
+      </group>
+    );
+  }
 
   // Driveable car + third-person camera
   function DriveableCar({
@@ -746,6 +827,9 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
 
   return (
     <>
+      {/* Blue sky and clouds */}
+      <Sky distance={450} sunPosition={[100, 20, 100]} inclination={0.49} azimuth={0.25} turbidity={6} />
+      <Clouds count={10} />
       {/* Floor - color shifts slightly when driving */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
         <planeGeometry args={[50, 50]} />
@@ -759,6 +843,8 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
       {isDriving ? (
         <>
           <Road length={300} width={8} />
+          {/* Floating welcome text positioned above the road slightly ahead of the camera start */}
+          <FloatingText position={[0, 2.5, -6]} text={"Welcome To My World"} color="#ffffff" />
         </>
       ) : (
         <>
@@ -772,6 +858,8 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
 
           {/* Mats */}
           <Mat position={[0, 0.1, -2]} />
+          {/* Floating welcome text for the gym scene as well */}
+          <FloatingText position={[0, 2.2, -4]} text={"Welcome To My World"} color="#ffffff" />
         </>
       )}
 
@@ -965,7 +1053,7 @@ function Player({
 }
 
 const CarScene: React.FC = () => {
-  const [showOverlay, setShowOverlay] = React.useState(true);
+  const [showOverlay, setShowOverlay] = React.useState(false);
   const hudRef = React.useRef({ speed: 0, steer: 0, drifting: false });
 
   return (
