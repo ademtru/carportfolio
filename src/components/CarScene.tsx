@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { PointerLockControls, useGLTF, Text3D, Center, Sky, Edges } from "@react-three/drei";
+import { Physics, RigidBody } from "@react-three/rapier";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { useEffect } from "react";
 import * as THREE from "three";
@@ -114,6 +115,7 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
   const srcPath = "/src/models/mphc-climbing-gym-22824/source/poly.glb";
   const [gltfScene, setGltfScene] = React.useState<any>(null);
   const [rx7Scene, setRx7Scene] = React.useState<any>(null);
+  const [mcdScene, setMcdScene] = React.useState<any>(null);
   useEffect(() => {
     let mounted = true;
     const loader = new GLTFLoader();
@@ -163,6 +165,18 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
       } catch (e) {
         // ignore
       }
+
+      // try loading McDonald's building model (placed in public/models)
+      const mcdPath = "/models/engadine_mcdonalds_restaurant_low_poly.glb";
+      try {
+        const resp2 = await fetch(mcdPath, { method: "HEAD" });
+        if (resp2.ok) {
+          const loader3 = new GLTFLoader();
+          loader3.load(mcdPath, (g) => setMcdScene(g.scene));
+        }
+      } catch (e) {
+        // ignore
+      }
     })();
 
     return () => {
@@ -179,44 +193,53 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
     ] as [number, number, number][];
   }, []);
 
-  function ModelWrapper({ object }: { object: THREE.Object3D }) {
+
+  function ModelWrapper({ object, desiredHeight = 4 }: { object: THREE.Object3D; desiredHeight?: number; }) {
     const ref = React.useRef<THREE.Group>(null!);
+    const [node, setNode] = React.useState<THREE.Object3D | null>(null);
 
     React.useEffect(() => {
-      if (!object) return;
-      // compute bbox
-      const box = new THREE.Box3().setFromObject(object);
+      if (!object) {
+        setNode(null);
+        return;
+      }
+
+      // clone the incoming object so we don't mutate the original GLTF scene
+      const cloned = object.clone(true) as THREE.Object3D;
+
+      // compute bbox on the clone
+      const box = new THREE.Box3().setFromObject(cloned);
       const size = new THREE.Vector3();
       box.getSize(size);
       const center = new THREE.Vector3();
       box.getCenter(center);
 
-      // desired max height in scene units
-      const desiredHeight = 4; // tune this to fit the gym in the view
+      // compute scale to match desired height
       const scale = desiredHeight / Math.max(size.y, 0.0001);
 
       // apply scale and reposition so bottom sits on y=0
-      object.scale.setScalar(scale);
-      object.updateMatrixWorld(true);
+      cloned.scale.setScalar(scale);
+      cloned.updateMatrixWorld(true);
 
       // recompute bbox after scaling
-      const box2 = new THREE.Box3().setFromObject(object);
+      const box2 = new THREE.Box3().setFromObject(cloned);
       const size2 = new THREE.Vector3();
       box2.getSize(size2);
       const center2 = new THREE.Vector3();
       box2.getCenter(center2);
 
-      // translate so center.xz -> 0 and bottom y -> 0
       const bottomY = box2.min.y;
-      object.position.x = -center2.x;
-      object.position.z = -center2.z;
-      object.position.y = -bottomY;
+      cloned.position.x = -center2.x;
+      cloned.position.z = -center2.z;
+      cloned.position.y = -bottomY;
+      cloned.updateMatrixWorld(true);
 
-      // ensure matrix updates
-      object.updateMatrixWorld(true);
-    }, [object]);
+      setNode(cloned);
+    }, [object, desiredHeight]);
 
-    return <group ref={ref}>{object && <primitive object={object} />}</group>;
+    return (
+      <group ref={ref}>{node ? <primitive object={node} /> : null}</group>
+    );
   }
 
   useFrame(() => {
@@ -272,54 +295,57 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
   }
 
   // Driveable car + third-person camera
-  function DriveableCar({
-    modelScene,
-    targetRef,
-    hudRef,
-    emitterRef,
-  }: {
+  function DriveableCar({ modelScene, cameraRef, hudRef, emitterRef, }: {
     modelScene?: THREE.Object3D | null;
-    targetRef?: React.RefObject<THREE.Group | null>;
+    cameraRef?: React.RefObject<THREE.Group | null>;
     hudRef?: React.RefObject<{ speed: number; steer: number; drifting: boolean }>;
     emitterRef?: React.RefObject<{ emit: (pos: THREE.Vector3, dir: THREE.Vector3, intensity?: number) => void } | null>;
   }) {
     const ownRef = useRef<THREE.Group | null>(null);
-    const ref = targetRef ?? ownRef;
+    const rigidRef = useRef<any | null>(null);
+    // ownRef is used for the car visual. cameraRef (if provided) is an anchor
+    // updated each frame so the camera can follow the car rotation/position.
+    const camAnchorRef = cameraRef ?? ownRef;
     const [carObject, setCarObject] = useState<THREE.Object3D | null>(null);
-    const velocity = useRef(new THREE.Vector3());
-    const forward = useRef(0);
-    const steer = useRef(0);
+  const visualRef = useRef<THREE.Group | null>(null);
+
+  // simulated velocity direction (unit vector) used to produce lateral slip
+  const velocityDir = useRef(new THREE.Vector3(0, 0, -1));
+
+    // Movement state
+    const position = useRef(new THREE.Vector3(2, 0, -3));
+  // start rotated anticlockwise 90 degrees so the car faces north
+  const heading = useRef(0); // radians
+    const speed = useRef(0); // scalar forward speed (m/s)
+
+    // Inputs
     const keys = useRef<Record<string, boolean>>({});
-  const prevDrift = useRef(false);
-  const driftEmitTimer = useRef(0);
-  const driftState = useRef(false); // whether we're currently in a sustained drift (throttle-driven)
-  const driftDir = useRef(0);
-  const driftCharge = useRef(0); // seconds of sustained drift conditions
 
-    // simple car parameters
-    const maxSpeed = 24; // units/s
-    const accel = 12; // units/s^2
-    const brake = 8;
-    const turnSpeed = 1.5; // radians/s at low speed
+    // Tunables (feel free to tweak)
+    const MAX_FORWARD = 60; // m/s
+    const MAX_REVERSE = -6; // m/s
+    const ACCELERATION = 12; // m/s^2
+    const BRAKE_DECEL = 60; // m/s^2 (when holding S)
+    const COAST_DRAG = 8; // m/s^2
+  // lower base turn rate and scale turn by actual speed (no minimum)
+  const TURN_RATE = Math.PI * 1.8; // rad/s at full steer (scaled by speed)
+    const HANDBRAKE_DRAG = 20; // extra drag when handbrake
 
+    // Setup input listeners
     useEffect(() => {
-      const onKeyDown = (e: KeyboardEvent) => (keys.current[e.code] = true);
-      const onKeyUp = (e: KeyboardEvent) => (keys.current[e.code] = false);
-      window.addEventListener("keydown", onKeyDown);
-      window.addEventListener("keyup", onKeyUp);
+      const down = (e: KeyboardEvent) => (keys.current[e.code] = true);
+      const up = (e: KeyboardEvent) => (keys.current[e.code] = false);
+      window.addEventListener('keydown', down);
+      window.addEventListener('keyup', up);
       return () => {
-        window.removeEventListener("keydown", onKeyDown);
-        window.removeEventListener("keyup", onKeyUp);
+        window.removeEventListener('keydown', down);
+        window.removeEventListener('keyup', up);
       };
     }, []);
 
-    // Auto-fit and position the car model so it's a reasonable size and sits on the floor
+    // Prepare/normalize model
     useEffect(() => {
-      if (!modelScene) {
-        setCarObject(null);
-        return;
-      }
-      // clone to avoid mutating original
+      if (!modelScene) { setCarObject(null); return; }
       const clone = modelScene.clone(true) as THREE.Object3D;
       clone.position.set(0, 0, 0);
       clone.scale.set(1, 1, 1);
@@ -328,47 +354,24 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
       const box = new THREE.Box3().setFromObject(clone);
       const size = new THREE.Vector3();
       box.getSize(size);
+      const targetLength = 3.8;
+      const targetHeight = 1.3;
+      const s1 = targetLength / Math.max(size.z, 1e-4);
+      const s2 = targetHeight / Math.max(size.y, 1e-4);
+      const scale = Math.min(s1, s2);
+      clone.scale.setScalar(scale);
+  // rotate the mesh so its local 'front' matches the world's forward direction
+  // (clockwise 90 degrees). This adjusts the visual orientation without
+  // affecting the physics kinematic body which we control via heading.
+  clone.rotateY(-Math.PI / 2);
+  clone.updateMatrixWorld(true);
 
-      // target dimensions (sensible defaults)
-      const desiredLength = 3.8; // front-to-back length
-      const desiredHeight = 1.3; // vehicle height
-
-      const scaleByLength = desiredLength / Math.max(size.z, 0.0001);
-      const scaleByHeight = desiredHeight / Math.max(size.y, 0.0001);
-      // choose a scale that fits both constraints
-      const chosenScale = Math.min(scaleByLength, scaleByHeight);
-
-      clone.scale.setScalar(chosenScale);
-      clone.updateMatrixWorld(true);
-
-      // recompute bbox after scaling
       const box2 = new THREE.Box3().setFromObject(clone);
-      const center2 = new THREE.Vector3();
-      box2.getCenter(center2);
+      const c = new THREE.Vector3();
+      box2.getCenter(c);
       const bottomY = box2.min.y;
-
-      // If the model's longest axis is X rather than Z, rotate so length aligns with Z
-      const sizeAfter = new THREE.Vector3();
-      box2.getSize(sizeAfter);
-      const longestAxis = Math.max(sizeAfter.x, sizeAfter.y, sizeAfter.z);
-      if (longestAxis === sizeAfter.x && sizeAfter.x > sizeAfter.z) {
-        // rotate 180 degrees so model faces the -Z forward direction
-        // (some models may be authored facing +Z or +X; apply a 180deg flip)
-        clone.rotateY(Math.PI / -2);
-        clone.updateMatrixWorld(true);
-        // recompute bounding box after rotation
-        const box3 = new THREE.Box3().setFromObject(clone);
-        box3.getCenter(center2);
-        // update bottomY as well
-        const bottomAfter = box3.min.y;
-        // shift down later using bottomAfter
-        // we'll recompute box2 below by setting box2 = box3
-        box2.copy(box3);
-      }
-
-      // center XZ and place bottom at y=0
-      clone.position.x = -center2.x;
-      clone.position.z = -center2.z;
+      clone.position.x = -c.x;
+      clone.position.z = -c.z;
       clone.position.y = -bottomY;
       clone.updateMatrixWorld(true);
 
@@ -376,239 +379,160 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
     }, [modelScene]);
 
     useFrame((_, delta) => {
-      if (!ref.current) return;
-      // read inputs: W/S accelerate/brake, A/D steer
-      const k = keys.current;
-      const inputForward = k["KeyW"] ? 1 : k["KeyS"] ? -1 : 0;
-      const inputSteer = k["KeyA"] ? 1 : k["KeyD"] ? -1 : 0;
+      // read inputs
+      const forwardInput = keys.current['KeyW'] ? 1 : keys.current['KeyS'] ? -1 : 0;
+      const steerInput = keys.current['KeyA'] ? 1 : keys.current['KeyD'] ? -1 : 0;
+      const handbrake = Boolean(keys.current['Space']);
 
-      // smooth inputs
-      forward.current += (inputForward - forward.current) * Math.min(1, accel * delta);
-      steer.current += (inputSteer - steer.current) * Math.min(1, 8 * delta);
-
-      // compute forward direction and project current velocity onto it
-      const forwardVec = new THREE.Vector3(0, 0, -1)
-        .applyQuaternion(ref.current.quaternion)
-        .setY(0)
-        .normalize();
-
-      // signed forward speed along the car's forward vector
-      const forwardSpeed = velocity.current.dot(forwardVec);
-
-      // target speed from input (local space)
-      const localForwardTarget = forward.current * maxSpeed;
-
-      // If there's throttle or reverse input, accelerate toward target.
-      // If there's no forward input, allow the car to coast with light rolling resistance
-      if (Math.abs(inputForward) > 0.001) {
-        const desiredSpeed = localForwardTarget;
-        const speedDiff = desiredSpeed - forwardSpeed;
-        const dv = Math.sign(speedDiff) * Math.min(Math.abs(speedDiff), accel * delta);
-        velocity.current.add(forwardVec.clone().multiplyScalar(dv));
+      // Acceleration / braking
+      if (forwardInput > 0) {
+        speed.current += ACCELERATION * delta * forwardInput;
+      } else if (forwardInput < 0) {
+        // braking/reverse
+        speed.current -= ACCELERATION * delta * -forwardInput;
       } else {
-        // coast: gentle rolling resistance instead of forcing speed toward zero
-        const rollingResistance = 1.5; // units/s^2 - small slow-down when coasting
-        const dvCoast = -Math.sign(forwardSpeed) * Math.min(Math.abs(forwardSpeed), rollingResistance * delta);
-        velocity.current.add(forwardVec.clone().multiplyScalar(dvCoast));
+        // coast drag
+        const drag = COAST_DRAG * delta;
+        if (speed.current > 0) speed.current = Math.max(0, speed.current - drag);
+        else speed.current = Math.min(0, speed.current + drag);
       }
 
-      // braking: if S is held and we're moving forward, apply stronger deceleration
-      if (k["KeyS"] && forwardSpeed > 0.001) {
-        const brakeDV = -Math.min(Math.abs(forwardSpeed), brake * delta);
-        velocity.current.add(forwardVec.clone().multiplyScalar(brakeDV));
+      // handbrake adds strong drag
+      if (handbrake) {
+        if (speed.current > 0) speed.current = Math.max(0, speed.current - HANDBRAKE_DRAG * delta);
+        else speed.current = Math.min(0, speed.current + HANDBRAKE_DRAG * delta);
       }
 
-  // steering: use a simple bicycle model so the car cannot turn from standstill
-      // wheelbase controls turning radius; maxSteerAngle limits wheel angle
-      const wheelBase = 2.8; // distance between axles, tune for responsiveness
-      const maxSteerAngle = Math.PI / 8; // ~30 degrees
+      // clamp speeds
+      speed.current = Math.max(MAX_REVERSE, Math.min(MAX_FORWARD, speed.current));
 
-      // steer.current is in [-1,1], map to wheel angle
-      const wheelAngle = steer.current * maxSteerAngle;
+    // Turning: use a non-linear steering curve to give a more RWD-like feel.
+    // - exponent < 1 makes low speeds more responsive (less 'stiff')
+    // - small low-speed assist so you can still steer when almost stopped
+    // - throttle (rear-wheel drive) slightly increases steer responsiveness
+    // - handbrake increases steer for drifting
+    // - small reduction at very high speed for stability
+    const speedNorm = Math.min(1, Math.abs(speed.current) / MAX_FORWARD);
+    const steerCurve = Math.pow(speedNorm, 0.6); // non-linear mapping
+    const lowSpeedAssist = 0.18; // minimum steer scale when nearly stopped
+    let turnScale = Math.max(steerCurve, lowSpeedAssist);
 
-      // forwardSpeed is signed along forwardVec; use its magnitude for yaw computation
-      const v = forwardSpeed; // can be negative when reversing
+    const throttleFactor = forwardInput > 0 ? 1 + 0.2 * forwardInput : 1;
+    const handbrakeFactor = handbrake ? 1.6 : 1;
+    turnScale *= throttleFactor * handbrakeFactor;
 
-      // yaw rate (rad/s) approximated by v / L * tan(steer)
-      let yawRate = 0;
-      if (Math.abs(wheelAngle) > 1e-4 && Math.abs(v) > 1e-3) {
-        yawRate = (v / wheelBase) * Math.tan(wheelAngle);
-      }
+    // reduce steering a bit at high speed for stability
+    turnScale *= 1 - 0.5 * speedNorm;
 
-      // suppress yaw when nearly stationary so you can't spin in place
-      const minSteerSpeed = 0.5; // below this speed, steering is scaled down
-      if (Math.abs(v) < minSteerSpeed) {
-        yawRate *= Math.abs(v) / minSteerSpeed;
-      }
+    const directionSign = speed.current >= 0 ? 1 : -1;
+    const turn = steerInput * TURN_RATE * turnScale * delta * directionSign;
+    heading.current += turn;
 
-      const yaw = yawRate * delta;
-      if (Math.abs(yaw) > 1e-6) {
-        // rotate the car transform
-        ref.current.rotateY(yaw);
+  // integrate position along simulated velocity direction (allows slip)
+  const forwardVec = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(0, heading.current, 0)).setY(0).normalize();
 
-        // rotate the horizontal velocity vector to follow the new heading
-        const up = new THREE.Vector3(0, 1, 0);
-        const horizVel = new THREE.Vector3(velocity.current.x, 0, velocity.current.z);
-        horizVel.applyAxisAngle(up, yaw);
-        velocity.current.x = horizVel.x;
-        velocity.current.z = horizVel.z;
-      }
+  // desired direction is the car's heading; velocityDir will lerp toward it based on grip
+  const desiredDir = forwardVec.clone();
 
-      // update HUD ref with current debug values (speed/steer only)
-      if (hudRef && hudRef.current) {
-        try {
-          hudRef.current.speed = Math.round(forwardSpeed * 10) / 10;
-          hudRef.current.steer = Math.round(steer.current * 100) / 100;
-        } catch (e) {
-          // ignore
-        }
-      }
+  // compute grip: lower grip when handbraking (drifting), slightly lower at high speeds
+  const baseGrip = 0.88; // how strongly velocity aligns to heading per second
+  const speedFactor = Math.min(1, Math.abs(speed.current) / MAX_FORWARD);
+  const gripWhileDriving = baseGrip * (1 - 0.35 * speedFactor);
+  const grip = handbrake ? 0.18 : gripWhileDriving;
 
-      // lateral damping: reduce sideways (right) component so the car doesn't keep sliding
-      const up = new THREE.Vector3(0, 1, 0);
-      const rightVec = new THREE.Vector3().crossVectors(up, forwardVec).normalize();
-      const lateral = velocity.current.dot(rightVec);
+  // lerp velocity direction toward desired heading (smaller lerp => more slide)
+  velocityDir.current.lerp(desiredDir, Math.max(0, grip) * Math.min(1, delta * 8));
+  velocityDir.current.normalize();
 
-      // drifting params (hysteresis + sustain timer for initiation)
-      const driftEnterSpeed = 7.0; // speed to consider entering throttle-driven drift
-      const driftExitSpeed = 4.5; // exiting drift when slower
-      const driftEnterSteer = 0.45; // steer magnitude to begin charging drift
-      const driftExitSteer = 0.3; // exit steer threshold
-      const driftChargeTime = 0.12; // seconds of sustained conditions to actually enter drift
-      const driftFactor = 1.1; // lateral accel factor when in drift
-      const handbrake = k["Space"];
+  const nextPos = position.current.clone().addScaledVector(velocityDir.current, speed.current * delta);
+  position.current.copy(nextPos);
 
-      // raw detection of potential throttle-driven drift
-      const throttle = k["KeyW"] ? 1 : 0;
-      const wantDrift = throttle > 0 && Math.abs(steer.current) > driftEnterSteer && Math.abs(forwardSpeed) > driftEnterSpeed;
+  // build quaternion for car body (heading)
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, heading.current, 0));
 
-      // charge up drift only when conditions sustained
-      if (!driftState.current) {
-        if (wantDrift) {
-          driftCharge.current += delta;
-          if (driftCharge.current >= driftChargeTime) {
-            driftState.current = true;
-            driftDir.current = Math.sign(steer.current) || 1;
-            driftCharge.current = 0;
+      // determine whether to apply rotation updates: only rotate the body when
+      // drifting or at higher speeds / large steer inputs. This avoids the car
+      // visibly yawing during light/slow turns.
+  const ROTATE_SPEED_THRESHOLD = 2.2; // m/s
+  // Only allow yaw rotation when handbraking (drift) or when moving above a
+  // minimum speed. Steering input alone at low speed will not rotate the body.
+  const rotateEnabled = handbrake || Math.abs(speed.current) > ROTATE_SPEED_THRESHOLD;
+
+      // update rapier kinematic body
+      try {
+          if (rigidRef.current) {
+            rigidRef.current.setNextKinematicTranslation({ x: nextPos.x, y: nextPos.y, z: nextPos.z });
+            if (rotateEnabled) {
+              rigidRef.current.setNextKinematicRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+            }
           }
-        } else {
-          driftCharge.current = Math.max(0, driftCharge.current - delta * 2);
-        }
-      } else {
-        // when in drift, allow it to persist until exit conditions met
-        const shouldExit = Math.abs(forwardSpeed) < driftExitSpeed || (Math.abs(steer.current) < driftExitSteer && !handbrake && throttle === 0);
-        if (shouldExit && !handbrake) {
-          driftState.current = false;
-          driftDir.current = 0;
-          driftCharge.current = 0;
-        }
+      } catch (e) {
+        /* ignore */
       }
-
-      const isDrifting = Boolean(handbrake || driftState.current);
-
-      // reduce lateral friction while drifting to allow slide but keep control
-      let lateralFriction = isDrifting ? 4.2 : 9;
-      const lateralDecay = Math.max(0, 1 - lateralFriction * delta);
-      let newLateral = lateral * lateralDecay;
-
-      if (isDrifting) {
-        const speedFactor = Math.min(1, Math.abs(forwardSpeed) / maxSpeed);
-
-        if (handbrake) {
-          // Handbrake: rear steps out via lateral acceleration and yaw
-          const handbrakeBrakeStrength = 16; // units/s^2
-          const hbBrakeDV = Math.min(Math.abs(forwardSpeed), handbrakeBrakeStrength * delta);
-          velocity.current.add(forwardVec.clone().multiplyScalar(-Math.sign(forwardSpeed || 1) * hbBrakeDV));
-
-          lateralFriction = 3.0;
-          const steerSign = steer.current !== 0 ? Math.sign(steer.current) : Math.sign(velocity.current.dot(rightVec)) || 1;
-          const handbrakeYawStrength = 1.0;
-          const yawAmount = handbrakeYawStrength * speedFactor * steerSign * delta * 0.9;
-          ref.current.rotateY(yawAmount);
-
-          // apply modest lateral acceleration (rear stepping out)
-          const lateralAccelMag = 0.9 * speedFactor;
-          const lateralAccel = rightVec.clone().multiplyScalar(steerSign * lateralAccelMag);
-          velocity.current.addScaledVector(lateralAccel, delta);
-
-          newLateral += (Math.sign(lateral) * 0.14) * speedFactor;
-        } else {
-          // throttle-driven drift: apply lateral acceleration gradually based on driftDir
-          const dirSign = driftState.current ? driftDir.current || Math.sign(steer.current) : Math.sign(steer.current);
-          const lateralAccel = rightVec.clone().multiplyScalar(-dirSign * driftFactor * speedFactor * Math.abs(steer.current));
-          velocity.current.addScaledVector(lateralAccel, delta);
-
-          newLateral += (Math.sign(lateral) * 0.14) * speedFactor;
+        // Update camera anchor (separate from the car visual group) so the camera
+        // follows the car's position and rotation. This avoids touching the visual
+        // group's transform which Rapier controls via the RigidBody.
+        if (camAnchorRef && (camAnchorRef as any).current) {
+          try {
+            (camAnchorRef as any).current.position.copy(nextPos);
+            if (rotateEnabled) {
+              (camAnchorRef as any).current.quaternion.copy(q);
+            }
+          } catch (err) {
+            // ignore
+          }
         }
-      }
 
-      // write final drift state to HUD (overrides earlier drift field)
-      if (hudRef && hudRef.current) {
+        // compute lateral velocity (signed) relative to heading for skid logic
+        const rightVec = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(0, heading.current, 0)).normalize();
+        const lateralSpeed = rightVec.dot(velocityDir.current) * speed.current; // positive => sliding right
+
+        // determine drifting state
+        const isDrifting = handbrake && Math.abs(lateralSpeed) > 0.8;
+
+        // emit skid particles from rear wheels when drifting or heavy lateral slip
         try {
-          hudRef.current.drifting = Boolean(isDrifting);
-        } catch (e) {
+          const emitter = emitterRef && (emitterRef as any).current;
+          if (emitter && Math.abs(lateralSpeed) > 0.6) {
+            // rear world position approx (a bit behind car)
+            const rearOffset = forwardVec.clone().multiplyScalar(-1.4).setY(0.15);
+            const rearPos = nextPos.clone().add(rearOffset);
+            const intensity = Math.min(1, Math.abs(lateralSpeed) / 6);
+            // emit with direction roughly opposite lateral component
+            const emitDir = rightVec.clone().multiplyScalar(Math.sign(lateralSpeed) * -1).setY(0);
+            emitter.emit(rearPos, emitDir, intensity);
+          }
+        } catch (err) {
           /* ignore */
         }
-      }
 
-      // forward component after applying dv (signed)
-      const newForward = velocity.current.dot(forwardVec);
-      const newVelXZ = forwardVec.clone().multiplyScalar(newForward).add(rightVec.clone().multiplyScalar(newLateral));
-      velocity.current.x = newVelXZ.x;
-      velocity.current.z = newVelXZ.z;
-
-      // apply light horizontal drag (keeps momentum but prevents runaway)
-      const dragFactor = 1 - Math.min(0.9, 0.12 * delta);
-      velocity.current.x *= dragFactor;
-      velocity.current.z *= dragFactor;
-
-      // integrate
-      ref.current.position.addScaledVector(velocity.current, delta);
-
-      // Emit skid particles when drifting or handbrake
-      try {
-        const emitApi = (emitterRef as any)?.current;
-        if (emitApi) {
-          // emit a burst when drift starts
-          if (!prevDrift.current && isDrifting) {
-            const worldPos = new THREE.Vector3();
-            ref.current.getWorldPosition(worldPos);
-            const dir = rightVec.clone().multiplyScalar(Math.sign(newLateral || 1) * 0.9);
-            emitApi.emit(worldPos, dir, Math.min(1, Math.abs(forwardSpeed) / maxSpeed));
-          }
-
-          // continuous emission while drifting (small puffs)
-          driftEmitTimer.current += delta;
-          if (isDrifting && driftEmitTimer.current > 0.06) {
-            driftEmitTimer.current = 0;
-            const worldPos = new THREE.Vector3();
-            ref.current.getWorldPosition(worldPos);
-            const dir = rightVec.clone().multiplyScalar(Math.sign(newLateral || 1) * 0.5);
-            emitApi.emit(worldPos, dir, Math.min(1, Math.abs(forwardSpeed) / maxSpeed));
-          }
-          if (!isDrifting) driftEmitTimer.current = 0;
-          prevDrift.current = isDrifting;
+        // apply a small visual roll to the car model only when drifting
+        if (visualRef.current) {
+          const targetRoll = isDrifting ? -Math.sign(lateralSpeed) * Math.min(0.45, Math.abs(lateralSpeed) / 8) : 0;
+          visualRef.current.rotation.z = THREE.MathUtils.lerp(visualRef.current.rotation.z || 0, targetRoll, Math.min(1, delta * 6));
         }
-      } catch (e) {
-        // ignore emitter errors
+
+      // update HUD
+      if (hudRef && hudRef.current) {
+        hudRef.current.speed = Math.round(speed.current * 10) / 10;
+        hudRef.current.steer = steerInput;
+        hudRef.current.drifting = !!(handbrake && Math.abs(velocityDir.current.dot(rightVec)) > 0.25);
       }
     });
 
     return (
-      <group ref={ref as any} position={[2, 0, -3]}>
-        {carObject ? (
-          <primitive object={carObject} />
-        ) : modelScene ? (
-          // if carObject hasn't been created yet, render raw (less ideal)
-          <primitive object={modelScene} scale={[0.5, 0.5, 0.5]} />
-        ) : (
-          // fallback placeholder car
-          <mesh>
-            <boxGeometry args={[1.6, 0.5, 3]} />
-            <meshStandardMaterial color={0xff0000} />
-          </mesh>
-        )}
-      </group>
+      <RigidBody ref={(r: any | null) => { rigidRef.current = r; }} type={"kinematicPosition"} position={[position.current.x, position.current.y, position.current.z]} rotation={[0, heading.current, 0]}>
+        <group ref={ownRef as any}>
+          <group ref={visualRef as any}>
+          {carObject ? <primitive object={carObject} /> : modelScene ? <primitive object={modelScene} scale={[0.5, 0.5, 0.5]} /> : (
+            <mesh>
+              <boxGeometry args={[1.6, 0.5, 3]} />
+              <meshStandardMaterial color={0xff0000} />
+            </mesh>
+          )}
+          </group>
+        </group>
+      </RigidBody>
     );
   }
 
@@ -806,7 +730,8 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
     return null;
   }
 
-  const carRef = useRef<THREE.Group>(null);
+  // separate ref used by the third-person camera to follow the car
+  const carCameraRef = useRef<THREE.Group>(null);
   const skidEmitterRef = useRef<null | { emit: (pos: THREE.Vector3, dir: THREE.Vector3, intensity?: number) => void }>(null);
   const isDriving = !!rx7Scene;
   React.useEffect(() => {
@@ -845,6 +770,15 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
           <Road length={300} width={8} />
           {/* Floating welcome text positioned above the road slightly ahead of the camera start */}
           <FloatingText position={[0, 2.5, -6]} text={"Welcome To My World"} color="#ffffff" />
+          {/* McDonald's building on the right side of the street if available */}
+          {mcdScene && (
+            <RigidBody type="fixed" colliders={"trimesh"} position={[-22.5, 0, -50]} rotation={[0, Math.PI / 2, 0]}>
+              {/* wrap and scale to ~12 units tall so it sits at human scale relative to the road */}
+              <group>
+                <ModelWrapper object={mcdScene} desiredHeight={12} />
+              </group>
+            </RigidBody>
+          )}
         </>
       ) : (
         <>
@@ -864,8 +798,12 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
       )}
 
       {/* RX7 car model (render driveable car and follow camera only when car model is present) */}
-  {rx7Scene && <DriveableCar modelScene={rx7Scene} targetRef={carRef} hudRef={hudRef} emitterRef={skidEmitterRef} />}
-    {rx7Scene && <ThirdPersonCamera targetRef={carRef} />}
+  {/* Driveable car (visuals + kinematic rigidbody); camera follows a separate anchor */}
+  {rx7Scene && <DriveableCar modelScene={rx7Scene} cameraRef={carCameraRef} hudRef={hudRef} emitterRef={skidEmitterRef} />}
+    {rx7Scene && <ThirdPersonCamera targetRef={carCameraRef} />}
+
+    {/* Camera anchor used by ThirdPersonCamera; DriveableCar will update this group's world transform */}
+    <group ref={carCameraRef as any} />
 
     {/* Skid particle system (renders points and exposes emit API via skidEmitterRef) */}
     <SkidParticles ref={skidEmitterRef as any} />
@@ -1104,7 +1042,9 @@ const CarScene: React.FC = () => {
         style={{ width: "100%", height: "100%" }}
       >
         <color attach="background" args={[0xf0f0f0]} />
-        <SceneContent hudRef={hudRef} />
+        <Physics gravity={[0, -9.81, 0]}>
+          <SceneContent hudRef={hudRef} />
+        </Physics>
       </Canvas>
     </div>
   );
