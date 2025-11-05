@@ -5,11 +5,12 @@ import { useFrame } from "@react-three/fiber";
 
 type HUDRef = React.RefObject<{ speed: number; steer: number; drifting: boolean }>;
 
-export default function DriveableCar({ modelScene, cameraRef, hudRef, emitterRef, }: {
+export default function DriveableCar({ modelScene, cameraRef, hudRef, emitterRef, startPosition, }: {
   modelScene?: THREE.Object3D | null;
   cameraRef?: React.RefObject<THREE.Group | null>;
   hudRef?: HUDRef;
   emitterRef?: React.RefObject<{ emit: (pos: THREE.Vector3, dir: THREE.Vector3, intensity?: number) => void } | null>;
+  startPosition?: [number, number, number];
 }) {
   const ownRef = useRef<THREE.Group | null>(null);
   const rigidRef = useRef<any | null>(null);
@@ -20,7 +21,8 @@ export default function DriveableCar({ modelScene, cameraRef, hudRef, emitterRef
   const velocityDir = useRef(new THREE.Vector3(0, 0, -1));
 
   // Movement state
-  const position = useRef(new THREE.Vector3(2, 0, -3));
+  const initialPos = startPosition ? new THREE.Vector3(...startPosition) : new THREE.Vector3(2, 0, -3);
+  const position = useRef(initialPos.clone());
   const heading = useRef(Math.PI / 2); // face north by default
   const speed = useRef(0);
 
@@ -173,7 +175,7 @@ export default function DriveableCar({ modelScene, cameraRef, hudRef, emitterRef
   });
 
   return (
-    <RigidBody ref={(r: any | null) => { rigidRef.current = r; }} type={"kinematicPosition"} position={[position.current.x, position.current.y, position.current.z]} rotation={[0, heading.current, 0]}>
+    <RigidBody ref={(r: any | null) => { rigidRef.current = r; }} type={"kinematicPosition"} position={[initialPos.x, initialPos.y, initialPos.z]} rotation={[0, heading.current, 0]}>
       <group ref={ownRef as any}>
         <group ref={visualRef as any}>
           {carObject ? <primitive object={carObject} /> : <mesh>

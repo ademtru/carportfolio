@@ -120,6 +120,7 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
   const [gltfScene, setGltfScene] = React.useState<any>(null);
   const [rx7Scene, setRx7Scene] = React.useState<any>(null);
   const [mcdScene, setMcdScene] = React.useState<any>(null);
+  const [deskScene, setDeskScene] = React.useState<any>(null);
   useEffect(() => {
     let mounted = true;
     const loader = new GLTFLoader();
@@ -177,6 +178,18 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
         if (resp2.ok) {
           const loader3 = new GLTFLoader();
           loader3.load(mcdPath, (g) => setMcdScene(g.scene));
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // try loading desk model (placed in public/models)
+      const deskPath = "/models/desk_low-poly.glb";
+      try {
+        const resp3 = await fetch(deskPath, { method: "HEAD" });
+        if (resp3.ok) {
+          const loader4 = new GLTFLoader();
+          loader4.load(deskPath, (g) => setDeskScene(g.scene));
         }
       } catch (e) {
         // ignore
@@ -336,44 +349,58 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
     <>
       {/* Blue sky and clouds */}
       <Sky distance={450} sunPosition={[100, 20, 100]} inclination={0.49} azimuth={0.25} turbidity={6} />
-      <Clouds count={10} />
+      {/* <Clouds count={10} /> */}
       {/* Floor - color shifts slightly when driving */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+      {/* <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
         <planeGeometry args={[50, 50]} />
         <meshStandardMaterial
           color={isDriving ? 0x333333 : 0x7a7a7a}
           roughness={1}
         />
-      </mesh>
+      </mesh> */}
 
-      {/* When driving, show the procedural road; otherwise show the gym model and holds */}
+      {/* When driving, show the procedural road or the desk model as the driveable environment; otherwise show the gym model and holds */}
       {isDriving ? (
         <>
-          <Road length={300} width={8} />
-          {/* Floating welcome text positioned above the road slightly ahead of the camera start */}
-          <FloatingText position={[0, 2.5, -6]} text={"Welcome To My World"} color="#ffffff" />
-          {/* McDonald's building on the right side of the street if available */}
-          {mcdScene && (
-            <RigidBody type="fixed" colliders={"trimesh"} position={[-22.5, 0, -50]} rotation={[0, Math.PI / 2, 0]}>
-              {/* wrap and scale to ~12 units tall so it sits at human scale relative to the road */}
-              <group>
-                <ModelWrapper object={mcdScene} desiredHeight={12} />
-              </group>
-            </RigidBody>
+          {deskScene ? (
+            // Render desk as a fixed physical trimesh so the kinematic car can drive on its surface
+            <>
+              <RigidBody type={"fixed"} colliders={"trimesh"} position={[0, -126.5, -25]} rotation={[0, 0, 0]}>
+                <group>
+                  <ModelWrapper object={deskScene} desiredHeight={200} />
+                </group>
+              </RigidBody>
+              <FloatingText position={[0, 6.5, -25]} text={"Drive On The Desk"} color="#ffffff" />
+            </>
+          ) : (
+            <>
+              <Road length={300} width={8} />
+              {/* Floating welcome text positioned above the road slightly ahead of the camera start */}
+              <FloatingText position={[0, 2.5, -25]} text={"Welcome To My World"} color="#ffffff" />
+              {/* McDonald's building on the right side of the street if available */}
+              {mcdScene && (
+                <RigidBody type={"fixed"} colliders={"trimesh"} position={[-22.5, 0, -50]} rotation={[0, Math.PI / 2, 0]}>
+                  {/* wrap and scale to ~12 units tall so it sits at human scale relative to the road */}
+                  <group>
+                    <ModelWrapper object={mcdScene} desiredHeight={12} />
+                  </group>
+                </RigidBody>
+              )}
+            </>
           )}
         </>
       ) : (
         <>
           {/* Imported gym model (if available) */}
-          {gltfScene && <ModelWrapper object={gltfScene} />}
+          {/* {gltfScene && <ModelWrapper object={gltfScene} />} */}
 
           {/* Holds (placeholder interactive points) */}
-          {holds.map((pos, i) => (
+          {/* {holds.map((pos, i) => (
             <Hold key={i} position={pos} color={Math.random() * 0xffffff} />
-          ))}
+          ))} */}
 
           {/* Mats */}
-          <Mat position={[0, 0.1, -2]} />
+          {/* <Mat position={[0, 0.1, -2]} /> */}
           {/* Floating welcome text for the gym scene as well */}
           <FloatingText position={[0, 2.2, -4]} text={"Welcome To My World"} color="#ffffff" />
         </>
@@ -381,8 +408,17 @@ function SceneContent({ wallCount = 2, hudRef }: { wallCount?: number; hudRef?: 
 
       {/* RX7 car model (render driveable car and follow camera only when car model is present) */}
   {/* Driveable car (visuals + kinematic rigidbody); camera follows a separate anchor */}
-  {rx7Scene && <DriveableCar modelScene={rx7Scene} cameraRef={carCameraRef} hudRef={hudRef} emitterRef={skidEmitterRef} />}
-    {rx7Scene && <ThirdPersonCamera targetRef={carCameraRef} />}
+  {rx7Scene && (
+    <DriveableCar
+      modelScene={rx7Scene}
+      cameraRef={carCameraRef}
+      hudRef={hudRef}
+      emitterRef={skidEmitterRef}
+      // if desk present, spawn the car above the desk center; otherwise use a road-aligned start
+      startPosition={deskScene ? [0, 1.2, -25] : [2, 0, -3]}
+    />
+  )}
+  {rx7Scene && <ThirdPersonCamera targetRef={carCameraRef} />}
 
     {/* Camera anchor used by ThirdPersonCamera; DriveableCar will update this group's world transform */}
     <group ref={carCameraRef as any} />
